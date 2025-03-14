@@ -2,6 +2,8 @@
 
 namespace App\Http\Controllers;
 
+use App\Http\Requests\LoginRequest;
+use App\Http\Requests\RegisterRequest;
 use App\Models\User;
 use App\Notifications\VerificationCodeNotification;
 use Dotenv\Parser\Parser;
@@ -15,31 +17,35 @@ use PhpParser\Node\Expr\Cast\Object_;
 
 class AuthController extends Controller
 {
-    public function register(Request $request)
+    public function register(RegisterRequest $request)
     {
-        $validated = $request->validate([
-            'name' => 'required|string|max:255',
-            'email' => 'required|string|email|max:255|unique:users',
-            'password' => 'required|string|min:6'
-        ]);
+        $validated = $request->validated();
         $user = User::create([
             'name' => $validated['name'],
             'email' => $validated['email'],
-            'password' => Hash::make($validated['password'])
+            'password' => Hash::make(value: $validated['password']),    
         ]);
 
-        $code = rand(100000, 999999);
-        Cache::put('verification_code_' . $user->id, $code, now()->addMinutes(5));
-        $user->notify(new VerificationCodeNotification($code));
+        $this->send_code($user);
+
         return response()->json([
-            'message' => 'Verification code sent to your email.',
+            'message' => 'Verification code sent to your email.'
         ], 201);
     }
+
+    protected function send_code(User $user)
+    {
+        $code = rand(100000, 999999);
+
+        $user->notify(new VerificationCodeNotification($code));
+        Cache::put("auth:otp:$user->id", $code, now()->addMinutes(5));
+    }
+
     public function verify_code(Request $request)
     {
         $validated = $request->validate([
-            'code' => 'required',
-            'email' => 'required|string|email|max:255'
+            'code' => ['required', 'digits:6'],
+            'email' => ['required','email', 'max:255'],
         ]);
         $user = User::where('email', $validated['email'])->first();
         if (!$user) {
@@ -47,45 +53,43 @@ class AuthController extends Controller
                 'message' => 'User not found.',
             ], 404);
         }
-        $cached_code = Cache::get('verification_code_' . $user->id);
+        $cached_code = Cache::get("auth:otp:$user->id");
         if ($cached_code && (int) $request['code'] == $cached_code)
         {
-            Cache::forget('verification_code_' . $user->id);
+            Cache::forget("auth:otp:$user->id");
 
             $user->email_verified_at = now();
             $user->save();
             $token = $user->createToken('authToken')->plainTextToken;
 
-            return response()->json(['token' => $token], 200);
+            return response()->json([
+                'token' => $token
+            ], 200);
         }
         return response()->json([
             'message' => 'Verification code is invalid.',
-            'cached_code' => $cached_code,
-            'code' => (int) $request['code']
         ], 400);
     }
 
-    public function login(Request $request)
+    public function login(LoginRequest $request)
     {
-        $validated = $request->validate([
-            'email' => 'required|string|email|max:255',
-            'password' => 'required|string|min:6'
-        ]);
+        $validated = $request->validated();
         if (Auth::attempt(['email' => $validated['email'], 'password' => $validated['password']]))
         {
             $user = Auth::user();
             if (!$user->hasVerifiedEmail())
             {
-                $code = rand(100000, 999999);
-                Cache::put('verification_code_' . $user->id, $code, now()->addMinutes(5));
-                $user->notify(new VerificationCodeNotification($code));
+                $this->send_code($user);
+                
                 return response()->json([
                     'message' => 'Verification code sent to your email.',
                 ], 201);
             }
+            $token = $user->createToken('authToken')->plainTextToken;
             return response()->json([
-                'message' => 'You are already verified.',
-            ]);
+                'message' => 'Login Successfully',
+                'token' => $token
+            ], 200);
         }
         return response()->json([
             'message' => 'Invalid email or password.',
